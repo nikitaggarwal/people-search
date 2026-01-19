@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
       `${query} linkedin profile`,
       {
         type: 'auto',
-        numResults: 30,
+        numResults: 50, // Increased from 30 to get more results after filtering
         text: { maxCharacters: 500 },
         highlights: {
           highlightsPerUrl: 5,
