@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Exa from 'exa-js';
 
-const exa = new Exa(process.env.EXA_API_KEY);
-
 export async function POST(request: NextRequest) {
+  // Initialize Exa at runtime, not build time
+  const exa = new Exa(process.env.EXA_API_KEY);
+  
   try {
     const { query } = await request.json();
 
