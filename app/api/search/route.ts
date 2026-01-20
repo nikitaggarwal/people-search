@@ -27,33 +27,45 @@ export async function POST(request: NextRequest) {
     console.log(`[DEBUG] GPT parsed query: company="${companyFromQuery}", title="${jobTitleFromQuery}", variations:`, titleVariations);
 
     // Use Exa to search for people profiles with LinkedIn URLs
-    // Make query more specific about the company to get better matches
-    const searchQuery = companyFromQuery 
-      ? `${query} currently works at ${companyFromQuery} linkedin profile`
-      : `${query} linkedin profile`;
+    // Keep query simple - Exa works better with simpler queries
+    const searchQuery = query;
+    
+    console.log(`[DEBUG] Exa search query: "${searchQuery}"`);
     
     const response = await exa.searchAndContents(
       searchQuery,
       {
         type: 'auto',
-        numResults: 100, // Increased to catch more potential matches
+        category: 'people', // Optimized for finding LinkedIn profiles
+        numResults: 100,
         text: { maxCharacters: 500 },
         highlights: {
           highlightsPerUrl: 5,
           numSentences: 3,
         },
-        includeDomains: ['linkedin.com/in'],
+        includeDomains: ['linkedin.com'], // Domain only, not path
       }
     );
+
+    console.log(`[DEBUG] Exa raw results count: ${response.results.length}`);
+    
+    // Log first 5 URLs to see what Exa returned
+    response.results.slice(0, 5).forEach((r: any, i: number) => {
+      console.log(`[DEBUG] Exa result ${i}: ${r.url}`);
+    });
 
     // Filter to only include actual LinkedIn profiles (/in/ URLs)
     // Exclude: job postings, company pages, posts, etc.
     const filteredResults = response.results.filter((result: any) => {
       const url = result.url || '';
-      return url.includes('linkedin.com/in/') && !url.includes('/jobs/') && !url.includes('/company/');
+      const isValid = url.includes('linkedin.com/in/') && !url.includes('/jobs/') && !url.includes('/company/');
+      if (!isValid && response.results.length < 20) {
+        console.log(`[DEBUG] Filtered out URL: ${url}`);
+      }
+      return isValid;
     });
     
-    console.log(`[DEBUG] Exa returned ${response.results.length} results, ${filteredResults.length} after filtering`);
+    console.log(`[DEBUG] After URL filtering: ${filteredResults.length} valid LinkedIn profile URLs`);
 
     // Transform the results to our profile format
     const profiles = filteredResults.map((result: any) => {
@@ -160,15 +172,30 @@ async function parseQueryWithGPT(query: string): Promise<{
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that parses job search queries. Extract the company name, job title, and provide alternative job titles that might be used at that company. Respond in JSON format: {\"company\": \"CompanyName\", \"jobTitle\": \"MainTitle\", \"titleVariations\": [\"alt1\", \"alt2\", \"alt3\"]}"
+          content: `You are a helpful assistant that parses job search queries. Extract the company name, job title, and provide alternative job titles that might be used at that SPECIFIC company.
+
+IMPORTANT: Different tech companies use different titles for the same role:
+- OpenAI uses "Member of Technical Staff" (MTS) instead of "Engineer"
+- Google uses "Software Engineer" with levels (L3-L8)
+- Meta uses "Software Engineer" or "IC" (Individual Contributor)
+- Anthropic uses "Member of Technical Staff" or "Research Engineer"
+- Stripe uses "Software Engineer" or "Staff Engineer"
+- Many AI labs use "Research Scientist" or "Research Engineer"
+
+Respond in JSON format: {"company": "CompanyName", "jobTitle": "MainTitle", "titleVariations": ["alt1", "alt2", "alt3", "alt4", "alt5"]}`
         },
         {
           role: "user",
-          content: `Parse this job search query and provide alternatives: "${query}"\n\nFor example, if searching for "director at OpenAI", the title variations might include: "Head of", "VP", "Vice President", "Lead", etc. Consider what title variations that specific company might use.`
+          content: `Parse this job search query and provide company-specific title alternatives: "${query}"
+
+Include ALL common variations used at that specific company. For example:
+- "engineer at OpenAI" → variations: ["Member of Technical Staff", "MTS", "Research Engineer", "Software Engineer", "Staff Engineer"]
+- "engineer at Google" → variations: ["Software Engineer", "SWE", "Staff Software Engineer", "Senior SWE", "L5 Engineer"]
+- "PM at Meta" → variations: ["Product Manager", "Technical Program Manager", "TPM", "Product Lead"]`
         }
       ],
       temperature: 0.3,
-      max_tokens: 200,
+      max_tokens: 300,
     });
 
     const responseText = completion.choices[0].message.content || '{}';
@@ -273,60 +300,51 @@ function delay(ms: number): Promise<void> {
 
 // Helper function to check if profiles already exist in HubSpot
 async function checkHubSpotStatus(profiles: any[]): Promise<any[]> {
-  if (!process.env.HUBSPOT_ACCESS_TOKEN) {
-    console.log('[DEBUG] No HubSpot token, skipping duplicate check');
-    return profiles;
+  if (!process.env.HUBSPOT_ACCESS_TOKEN || profiles.length === 0) {
+    return profiles.map(p => ({ ...p, inHubSpot: false }));
   }
 
   const hubspotClient = new Client({ accessToken: process.env.HUBSPOT_ACCESS_TOKEN });
+  
+  // Process in batches of 5 to balance speed vs rate limits
+  const BATCH_SIZE = 5;
   const profilesWithStatus: any[] = [];
-
-  // Check profiles sequentially with delay to avoid rate limits
-  for (const profile of profiles) {
-    try {
-      // Search HubSpot for contact by LinkedIn URL
-      const searchResponse = await hubspotClient.crm.contacts.searchApi.doSearch({
-        filterGroups: [
-          {
-            filters: [
-              {
+  
+  for (let i = 0; i < profiles.length; i += BATCH_SIZE) {
+    const batch = profiles.slice(i, i + BATCH_SIZE);
+    
+    // Process batch in parallel
+    const results = await Promise.all(
+      batch.map(async (profile) => {
+        try {
+          const searchResponse = await hubspotClient.crm.contacts.searchApi.doSearch({
+            filterGroups: [{
+              filters: [{
                 propertyName: 'hs_linkedin_url',
                 operator: 'EQ' as any,
                 value: profile.linkedinUrl,
-              },
-            ],
-          },
-        ],
-        properties: ['firstname', 'lastname'],
-        limit: 1,
-      });
+              }],
+            }],
+            properties: ['firstname', 'lastname'],
+            limit: 1,
+          });
 
-      if (searchResponse.results.length > 0) {
-        // Profile exists in HubSpot
-        console.log(`[DEBUG] ✓ Found ${profile.name} in HubSpot`);
-        profilesWithStatus.push({
-          ...profile,
-          inHubSpot: true,
-          hubSpotContactId: searchResponse.results[0].id,
-        });
-      } else {
-        // New profile
-        profilesWithStatus.push({
-          ...profile,
-          inHubSpot: false,
-        });
-      }
-      
-      // Add 200ms delay between requests to avoid rate limit
-      await delay(200);
-      
-    } catch (error: any) {
-      console.error(`Error checking HubSpot for ${profile.name}:`, error.message);
-      // On error, assume not in HubSpot
-      profilesWithStatus.push({
-        ...profile,
-        inHubSpot: false,
-      });
+          return {
+            ...profile,
+            inHubSpot: searchResponse.results.length > 0,
+            hubSpotContactId: searchResponse.results[0]?.id,
+          };
+        } catch {
+          return { ...profile, inHubSpot: false };
+        }
+      })
+    );
+    
+    profilesWithStatus.push(...results);
+    
+    // Small delay between batches (not between each request)
+    if (i + BATCH_SIZE < profiles.length) {
+      await delay(100);
     }
   }
 
@@ -376,60 +394,48 @@ function cleanExtractedText(text: string): string {
     .trim();
 }
 
-// Helper function to extract a meaningful bio
-function extractBio(text: string, highlights: string, pageTitle: string): string {
-  const fullText = `${highlights} ${text}`;
+// Helper function to extract just the job title, removing names and other artifacts
+function cleanJobTitle(title: string, name: string): string {
+  let cleaned = title;
   
-  // Filter out common LinkedIn login/UI text
-  const junkPatterns = [
-    /sign in to view/i,
-    /join now/i,
-    /email or phone/i,
-    /forgot password/i,
-    /user agreement/i,
-    /privacy policy/i,
-    /cookie policy/i,
-    /new to linkedin/i,
-    /by clicking continue/i,
-    /view.*profile/i,
-    /connect with/i,
-  ];
-  
-  // Split into sentences and filter
-  const sentences = fullText.split(/[.!?]+/).map(s => s.trim()).filter(s => {
-    if (s.length < 20 || s.length > 300) return false;
-    return !junkPatterns.some(pattern => pattern.test(s));
-  });
-  
-  // If we found good sentences, return the first one
-  if (sentences.length > 0) {
-    return cleanExtractedText(sentences[0]);
+  // Remove "Name - Title" pattern
+  if (cleaned.includes(' - ')) {
+    cleaned = cleaned.split(' - ').pop() || cleaned;
   }
   
-  // Fallback: Try to extract from page title (after the name)
-  // Format: "Name - Title at Company | LinkedIn"
-  const titleMatch = pageTitle.match(/\-\s*(.+?)\s*\|/);
-  if (titleMatch && titleMatch[1]) {
-    return cleanExtractedText(titleMatch[1]);
+  // Remove "name is Title" pattern (case insensitive)
+  cleaned = cleaned.replace(/^[a-zA-Z\s\.]+\s+is\s+/i, '');
+  
+  // Remove duplicated name patterns like "name name is Title"
+  if (name && name !== 'Unknown') {
+    const nameLower = name.toLowerCase();
+    const cleanedLower = cleaned.toLowerCase();
+    // Check if title starts with the name (possibly duplicated)
+    if (cleanedLower.startsWith(nameLower)) {
+      cleaned = cleaned.substring(name.length).trim();
+      // Check again for duplicated name
+      if (cleaned.toLowerCase().startsWith(nameLower)) {
+        cleaned = cleaned.substring(name.length).trim();
+      }
+      // Remove leading "is"
+      cleaned = cleaned.replace(/^is\s+/i, '');
+    }
   }
   
-  // Last resort: return empty or a placeholder
-  return 'LinkedIn profile (bio not available)';
+  // Remove any remaining "is " at the start
+  cleaned = cleaned.replace(/^is\s+/i, '');
+  
+  // Clean up any leading/trailing junk
+  cleaned = cleaned.replace(/^[\s\-•·:]+|[\s\-•·:]+$/g, '').trim();
+  
+  return cleaned || title; // Return original if cleaning resulted in empty string
 }
 
 // Main extraction logic
 function extractProfileData(result: any, searchCompany: string) {
-      // LinkedIn title format examples:
-      // "Chris Beaumont - Data Science @ OpenAI | LinkedIn"
-      // "Daniel McAuley - Data at OpenAI | LinkedIn"
-      // "Name - Title at Company | LinkedIn"
-      
       const title = result.title || '';
       const text = result.text || '';
       const highlights = result.highlights?.join(' ') || '';
-      
-      // Extract a clean bio/summary
-      const summary = extractBio(text, highlights, title);
       
       // Remove "| LinkedIn" and similar suffixes
       const cleanTitle = title.replace(/\s*[\|•]\s*(LinkedIn|Professional Profile).*$/i, '').trim();
@@ -508,21 +514,19 @@ function extractProfileData(result: any, searchCompany: string) {
         const fullText = `${text} ${highlights}`;
         
         // Pattern 1: Look for "Experience" section with job titles
-        // This is the most reliable pattern for LinkedIn
         const experiencePatterns = [
-          /Experience[:\s\n]+([^\n•·\d]{5,80})[\n•·]/i,  // General experience pattern
-          /Current[:\s]+([^\n•·\d]{5,80})[\n•·]/i,       // Current position
+          /Experience[:\s\n]+([^\n•·\d]{5,80})[\n•·]/i,
+          /Current[:\s]+([^\n•·\d]{5,80})[\n•·]/i,
         ];
         
         for (const pattern of experiencePatterns) {
           const match = fullText.match(pattern);
           if (match && match[1]) {
             const extractedTitle = cleanExtractedText(match[1].trim());
-            // Validate it looks like a job title
             const isDuration = /\d+\s*(year|yr|month|mo|week|day)s?/i.test(extractedTitle);
             const isDate = /^\d{4}/.test(extractedTitle) || /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(extractedTitle);
             const isValidLength = extractedTitle.length >= 5 && extractedTitle.length <= 80;
-            const hasOnlyName = /^[A-Z][a-z]+\s+[A-Z][a-z]+$/.test(extractedTitle); // "First Last"
+            const hasOnlyName = /^[A-Z][a-z]+\s+[A-Z][a-z]+$/.test(extractedTitle);
             
             if (isValidLength && !isDuration && !isDate && !hasOnlyName) {
               jobTitle = extractedTitle;
@@ -531,9 +535,9 @@ function extractProfileData(result: any, searchCompany: string) {
           }
         }
         
-        // Pattern 2: Look for job title abbreviations in bio (only if no title found yet)
+        // Pattern 2: Look for job title abbreviations in bio
         if (jobTitle === 'Not specified') {
-          const abbrevMatch = fullText.match(/\b([A-Z]{2,})\b\s*[@|at]\s*([A-Z][a-zA-Z0-9\s&]+)/i);
+          const abbrevMatch = fullText.match(/\b([A-Z]{2,5})\b\s*(?:@|at)\s+([A-Z][a-zA-Z0-9\s&]+)/);
           if (abbrevMatch) {
             jobTitle = abbrevMatch[1];
             if (abbrevMatch[2] && company === 'Not specified') {
@@ -548,7 +552,6 @@ function extractProfileData(result: any, searchCompany: string) {
         const fullText = `${text} ${highlights}`;
         
         // Look for experience entries that mention the search company
-        // Pattern: "Job Title\nCompany Name" or "Job Title at Company Name"
         const companyPattern = new RegExp(
           `([^\\n•·]{5,80})[\\s\\n]+(?:at\\s+)?${searchCompany.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
           'i'
@@ -557,8 +560,6 @@ function extractProfileData(result: any, searchCompany: string) {
         const companyMatch = fullText.match(companyPattern);
         if (companyMatch && companyMatch[1]) {
           const extractedTitle = cleanExtractedText(companyMatch[1].trim());
-          
-          // Validate it looks like a job title
           const isDuration = /\d+\s*(year|yr|month|mo|week|day)s?/i.test(extractedTitle);
           const isDate = /^\d{4}/.test(extractedTitle) || /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(extractedTitle);
           const isValidLength = extractedTitle.length >= 5 && extractedTitle.length <= 80;
@@ -566,7 +567,14 @@ function extractProfileData(result: any, searchCompany: string) {
           
           if (isValidLength && !isDuration && !isDate && !hasOnlyName) {
             jobTitle = extractedTitle;
-            company = searchCompany; // Use the search company since we matched it
+            company = searchCompany;
+          }
+        }
+        
+        // Fallback: if company still not found, check if search company appears in text
+        if (company === 'Not specified') {
+          if (fullText.toLowerCase().includes(searchCompany.toLowerCase())) {
+            company = searchCompany;
           }
         }
       }
@@ -576,12 +584,14 @@ function extractProfileData(result: any, searchCompany: string) {
       jobTitle = cleanExtractedText(jobTitle);
       company = cleanExtractedText(company);
       
+      // Extract just the job title, removing name prefixes and artifacts
+      jobTitle = cleanJobTitle(jobTitle, name);
+      
       return {
-        id: result.id,
+        id: result.id || result.url || `profile-${Math.random().toString(36).substr(2, 9)}`,
         name,
         title: jobTitle,
         company,
         linkedinUrl: result.url,
-        summary,
       };
 }

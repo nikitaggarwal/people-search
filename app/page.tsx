@@ -8,10 +8,11 @@ interface Profile {
   title: string;
   company: string;
   linkedinUrl: string;
-  summary: string;
   inHubSpot?: boolean;
   hubSpotContactId?: string;
 }
+
+type SortOption = 'relevance' | 'name' | 'title' | 'company' | 'crm';
 
 export default function Home() {
   const [query, setQuery] = useState('');
@@ -21,6 +22,30 @@ export default function Home() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
   const [hideContacted, setHideContacted] = useState(false);
+  const [sortBy, setSortBy] = useState<SortOption>('relevance');
+
+  // Sort profiles based on selected option
+  const sortProfiles = (profilesToSort: Profile[]): Profile[] => {
+    if (sortBy === 'relevance') return profilesToSort; // Keep Exa's original order
+    
+    return [...profilesToSort].sort((a, b) => {
+      switch (sortBy) {
+        case 'name':
+          return a.name.localeCompare(b.name);
+        case 'title':
+          return a.title.localeCompare(b.title);
+        case 'company':
+          return a.company.localeCompare(b.company);
+        case 'crm':
+          // In CRM first, then not in CRM
+          if (a.inHubSpot && !b.inHubSpot) return -1;
+          if (!a.inHubSpot && b.inHubSpot) return 1;
+          return 0;
+        default:
+          return 0;
+      }
+    });
+  };
 
   const handleSearch = async () => {
     if (!query.trim()) return;
@@ -104,6 +129,13 @@ export default function Home() {
 
       alert(`✓ Successfully exported ${selectedProfiles.size} profiles and synced to HubSpot!`);
       
+      // Mark exported profiles as "In CRM" immediately (no refresh needed)
+      setProfiles(prevProfiles => 
+        prevProfiles.map(p => 
+          selectedProfiles.has(p.id) ? { ...p, inHubSpot: true } : p
+        )
+      );
+      
       // Clear selection after export
       setSelectedProfiles(new Set());
     } catch (err: any) {
@@ -111,6 +143,25 @@ export default function Home() {
     } finally {
       setExporting(false);
     }
+  };
+
+  const handleCopyUrls = () => {
+    if (selectedProfiles.size === 0) {
+      alert('Please select at least one profile to copy URLs');
+      return;
+    }
+
+    const selectedProfileData = profiles.filter(p => selectedProfiles.has(p.id));
+    const urls = selectedProfileData.map(p => p.linkedinUrl).join('\n');
+
+    navigator.clipboard.writeText(urls).then(
+      () => {
+        alert(`✓ Copied ${selectedProfiles.size} LinkedIn URLs to clipboard!\n\nYou can now paste them directly into Clay for enrichment.`);
+      },
+      (err) => {
+        alert(`Failed to copy URLs: ${err}`);
+      }
+    );
   };
 
   return (
@@ -154,6 +205,9 @@ export default function Home() {
             ? profiles.filter(p => !p.inHubSpot)
             : profiles;
           
+          // Apply sorting after filtering
+          const sortedProfiles = sortProfiles(filteredProfiles);
+          
           const contactedCount = profiles.filter(p => p.inHubSpot).length;
           
           return (
@@ -173,6 +227,18 @@ export default function Home() {
                 )}
               </div>
               <div className="flex items-center gap-3">
+                {/* Sort dropdown */}
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortOption)}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white cursor-pointer"
+                >
+                  <option value="relevance">Sort: Relevance</option>
+                  <option value="name">Sort: Name (A-Z)</option>
+                  <option value="title">Sort: Title (A-Z)</option>
+                  <option value="company">Sort: Company (A-Z)</option>
+                  <option value="crm">Sort: In CRM first</option>
+                </select>
                 {contactedCount > 0 && (
                   <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                     <input
@@ -185,11 +251,19 @@ export default function Home() {
                   </label>
                 )}
                 <button
+                  onClick={handleCopyUrls}
+                  disabled={selectedProfiles.size === 0}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                  title="Copy LinkedIn URLs for Clay"
+                >
+                  📋 Copy URLs {selectedProfiles.size > 0 ? `(${selectedProfiles.size})` : ''}
+                </button>
+                <button
                   onClick={handleExport}
                   disabled={selectedProfiles.size === 0 || exporting}
                   className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
                 >
-                  {exporting ? 'Exporting...' : `Export ${selectedProfiles.size > 0 ? `(${selectedProfiles.size})` : ''}`}
+                  {exporting ? 'Exporting...' : `Export CSV ${selectedProfiles.size > 0 ? `(${selectedProfiles.size})` : ''}`}
                 </button>
               </div>
             </div>
@@ -209,13 +283,12 @@ export default function Home() {
                     <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Name</th>
                     <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Title</th>
                     <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Company</th>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Bio</th>
                     <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">LinkedIn URL</th>
                     <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {filteredProfiles.map((profile) => (
+                  {sortedProfiles.map((profile) => (
                     <tr key={profile.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4">
                         <input
@@ -237,7 +310,6 @@ export default function Home() {
                       </td>
                       <td className="px-6 py-4 text-gray-800">{profile.title}</td>
                       <td className="px-6 py-4 text-gray-800">{profile.company}</td>
-                      <td className="px-6 py-4 text-gray-700 text-sm max-w-xs truncate">{profile.summary}</td>
                       <td className="px-6 py-4 text-blue-600 text-sm max-w-xs truncate">
                         {profile.linkedinUrl}
                       </td>

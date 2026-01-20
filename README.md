@@ -4,13 +4,16 @@ Internal people search platform for talent prospecting and outreach. Search for 
 
 ## Features
 
+- **GPT-Powered Search** - AI intelligently parses queries and generates title variations
 - **Natural Language Search** - Search using queries like "data scientists at OpenAI" or "ML engineers at Meta"
 - **LinkedIn Profile Discovery** - Automatically finds and filters LinkedIn profiles
+- **Smart Duplicate Prevention** - Checks HubSpot CRM and shows "In CRM" badges on already-contacted profiles
 - **Clean Data Extraction** - Parses names, job titles, companies, and bios from profiles
 - **Multi-Select Export** - Choose specific profiles to export
-- **CSV Export** - Download profile data for use in Clay or other enrichment tools
+- **Copy URLs for Clay** - One-click copy LinkedIn URLs to clipboard for pasting into Clay
+- **CSV Export** - Download profile data for traditional enrichment workflows
 - **HubSpot CRM Sync** - Automatically creates/updates contacts in HubSpot
-- **Duplicate Prevention** - Checks LinkedIn URLs to avoid re-contacting people
+- **Hide Contacted Toggle** - Filter out profiles already in your CRM
 
 ## Tech Stack
 
@@ -36,6 +39,9 @@ EXA_API_KEY=your_exa_api_key_here
 
 # HubSpot Access Token (from HubSpot Private Apps)
 HUBSPOT_ACCESS_TOKEN=your_hubspot_token_here
+
+# OpenAI API Key (for GPT-powered query parsing)
+OPENAI_API_KEY=your_openai_key_here
 ```
 
 ### 3. Get API Keys
@@ -63,12 +69,15 @@ Open [http://localhost:3000](http://localhost:3000) to use the tool.
 
 ## Usage
 
-1. **Search**: Enter a natural language query (e.g., "rubric makers at Scale AI")
-2. **Review**: Browse the results table showing names, titles, companies, and LinkedIn URLs
+1. **Search**: Enter a natural language query (e.g., "director at OpenAI" or "MTS at Meta")
+   - GPT intelligently parses your query and finds title variations
+2. **Review**: Browse results with "In CRM" badges for already-contacted profiles
+   - Toggle "Hide contacted" to focus on new prospects only
 3. **Select**: Check the boxes for profiles you want to export
-4. **Export**: Click "Export" to:
-   - Download a CSV file with all profile data
-   - Automatically sync contacts to HubSpot CRM
+4. **Export Options**:
+   - **📋 Copy URLs**: Copy LinkedIn URLs to clipboard for pasting into Clay
+   - **Export CSV**: Download CSV with all profile data
+   - CSV export automatically syncs contacts to HubSpot CRM
 
 ## Project Structure
 
