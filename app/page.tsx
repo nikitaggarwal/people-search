@@ -207,8 +207,8 @@ export default function Home() {
                       <td className="px-6 py-4">
                         <a
                           href={profile.linkedinUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
+            target="_blank"
+            rel="noopener noreferrer"
                           className="text-blue-600 hover:underline text-sm"
                         >
                           View →
@@ -229,7 +229,7 @@ export default function Home() {
             <p className="text-sm mt-2">Try: "ML engineers at OpenAI" or "designers at Figma"</p>
           </div>
         )}
-      </div>
+        </div>
     </div>
   );
 }

@@ -15,18 +15,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract company name from query for better matching
-    // Examples: "data scientists at OpenAI" -> "OpenAI"
-    //           "engineers @ Meta" -> "Meta"
+    // Extract company and job title from query for better matching
+    // Examples: "data scientists at OpenAI" -> company: "OpenAI", title: "data scientist"
+    //           "engineers @ Meta" -> company: "Meta", title: "engineer"
     const companyFromQuery = extractCompanyFromQuery(query);
+    const jobTitleFromQuery = extractJobTitleFromQuery(query);
 
     // Use Exa to search for people profiles with LinkedIn URLs
-    // Explicitly search for profiles only, not jobs or companies
+    // Make query more specific about the company to get better matches
+    const searchQuery = companyFromQuery 
+      ? `${query} currently works at ${companyFromQuery} linkedin profile`
+      : `${query} linkedin profile`;
+    
     const response = await exa.searchAndContents(
-      `${query} linkedin profile`,
+      searchQuery,
       {
         type: 'auto',
-        numResults: 50, // Increased from 30 to get more results after filtering
+        numResults: 100, // Increased to catch more potential matches
         text: { maxCharacters: 500 },
         highlights: {
           highlightsPerUrl: 5,
@@ -42,13 +47,35 @@ export async function POST(request: NextRequest) {
       const url = result.url || '';
       return url.includes('linkedin.com/in/') && !url.includes('/jobs/') && !url.includes('/company/');
     });
+    
+    console.log(`[DEBUG] Exa returned ${response.results.length} results, ${filteredResults.length} after filtering`);
 
     // Transform the results to our profile format
     const profiles = filteredResults.map((result: any) => {
       return extractProfileData(result, companyFromQuery);
     });
 
-    return NextResponse.json({ profiles });
+    // Filter to only current employees with matching job title
+    const finalProfiles = profiles.filter(profile => {
+      // Must work at the searched company
+      if (companyFromQuery && !isCurrentEmployee(profile, companyFromQuery)) {
+        console.log(`[DEBUG] Filtered out ${profile.name}: Company mismatch (has: "${profile.company}", need: "${companyFromQuery}")`);
+        return false;
+      }
+      
+      // Must have matching job title if specified in search
+      if (jobTitleFromQuery && !hasMatchingJobTitle(profile, jobTitleFromQuery)) {
+        console.log(`[DEBUG] Filtered out ${profile.name}: Title mismatch (has: "${profile.title}", need: "${jobTitleFromQuery}")`);
+        return false;
+      }
+      
+      console.log(`[DEBUG] ✓ Included ${profile.name}: ${profile.title} at ${profile.company}`);
+      return true;
+    });
+    
+    console.log(`[DEBUG] Final results: ${finalProfiles.length} profiles`);
+
+    return NextResponse.json({ profiles: finalProfiles });
   } catch (error: any) {
     console.error('Search error:', error);
     return NextResponse.json(
@@ -66,6 +93,94 @@ function extractCompanyFromQuery(query: string): string {
     return atMatch[1].trim();
   }
   return '';
+}
+
+// Helper function to extract job title from search query
+function extractJobTitleFromQuery(query: string): string {
+  // Get everything before "at" or "@"
+  // e.g., "data scientists at OpenAI" -> "data scientists"
+  const beforeAt = query.split(/\s+(?:at|@)\s+/i)[0].trim();
+  
+  if (!beforeAt) return '';
+  
+  // Clean up common variations (plural, etc.)
+  return beforeAt.toLowerCase();
+}
+
+// Helper function to check if profile's job title matches searched title
+function hasMatchingJobTitle(profile: any, searchedTitle: string): boolean {
+  const profileTitle = (profile.title || '').toLowerCase();
+  
+  // Exclude profiles without a title
+  if (!profileTitle || profileTitle === 'not specified') {
+    return false;
+  }
+  
+  const searchedLower = searchedTitle.toLowerCase();
+  
+  // Normalize hyphens and special characters for better matching
+  const normalizeTitle = (title: string) => title.replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim();
+  const normalizedProfile = normalizeTitle(profileTitle);
+  const normalizedSearch = normalizeTitle(searchedLower);
+  
+  // Direct substring match (normalized)
+  if (normalizedProfile.includes(normalizedSearch) || normalizedSearch.includes(normalizedProfile)) {
+    return true;
+  }
+  
+  // Special case: "co-founder" and "founder" should match each other
+  if ((normalizedSearch.includes('founder') || normalizedProfile.includes('founder'))) {
+    if (normalizedSearch.includes('co founder') || normalizedSearch.includes('cofounder')) {
+      // Searching for co-founder - accept "founder", "co-founder", "cofounder"
+      return normalizedProfile.includes('founder');
+    }
+    if (normalizedProfile.includes('co founder') || normalizedProfile.includes('cofounder')) {
+      // Profile is co-founder - matches "founder" search
+      return normalizedSearch.includes('founder');
+    }
+  }
+  
+  // Handle common variations
+  // "engineer" matches "software engineer", "senior engineer", etc.
+  const searchWords = normalizedSearch.split(/\s+/);
+  const profileWords = normalizedProfile.split(/\s+/);
+  
+  // Check if key words from search appear in profile title
+  const keyMatches = searchWords.filter(word => {
+    // Skip common words
+    if (['a', 'the', 'and', 'or', 'at', 'in', 'of'].includes(word)) return false;
+    // Check if this word appears in profile title
+    return profileWords.some((pWord: string) => pWord.includes(word) || word.includes(pWord));
+  });
+  
+  // If more than 50% of key words match, consider it a match
+  return keyMatches.length > 0 && keyMatches.length >= searchWords.length * 0.5;
+}
+
+// Helper function to check if profile indicates employment at the searched company
+function isCurrentEmployee(profile: any, searchCompany: string): boolean {
+  const companyLower = searchCompany.toLowerCase();
+  const profileCompany = (profile.company || '').toLowerCase();
+  
+  // STRICT: Company field must match the searched company
+  // This ensures the person actually works/worked at the searched company
+  if (!profileCompany || profileCompany === 'not specified') {
+    return false;
+  }
+  
+  // Check if profile company matches search company (with some fuzzy matching)
+  // e.g., "OpenAI" matches "OpenAI" or "openai"
+  if (profileCompany.includes(companyLower) || companyLower.includes(profileCompany)) {
+    return true;
+  }
+  
+  // Exact match (case insensitive)
+  if (profileCompany === companyLower) {
+    return true;
+  }
+  
+  // No match - exclude this profile
+  return false;
 }
 
 // Helper function to clean extracted text from markdown and formatting
@@ -133,13 +248,6 @@ function extractProfileData(result: any, searchCompany: string) {
       const title = result.title || '';
       const text = result.text || '';
       const highlights = result.highlights?.join(' ') || '';
-      
-      // DEBUG: Log what we're getting from Exa
-      console.log('---');
-      console.log('URL:', result.url);
-      console.log('Title:', title);
-      console.log('Text length:', text.length);
-      console.log('Highlights:', highlights.substring(0, 200));
       
       // Extract a clean bio/summary
       const summary = extractBio(text, highlights, title);
