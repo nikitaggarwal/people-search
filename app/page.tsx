@@ -18,6 +18,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
+  const [hideContacted, setHideContacted] = useState(false);
 
   const handleSearch = async () => {
     if (!query.trim()) return;
@@ -146,7 +147,14 @@ export default function Home() {
         )}
 
         {/* Results */}
-        {profiles.length > 0 && (
+        {profiles.length > 0 && (() => {
+          const filteredProfiles = hideContacted 
+            ? profiles.filter(p => !p.inHubSpot)
+            : profiles;
+          
+          const contactedCount = profiles.filter(p => p.inHubSpot).length;
+          
+          return (
           <div className="bg-white rounded-lg shadow">
             <div className="p-6 border-b border-gray-200 flex justify-between items-center">
               <div className="flex items-center gap-4">
@@ -156,14 +164,32 @@ export default function Home() {
                 <span className="text-gray-700">
                   ({selectedProfiles.size} selected)
                 </span>
+                {contactedCount > 0 && (
+                  <span className="text-orange-600 text-sm">
+                    • {contactedCount} already in CRM
+                  </span>
+                )}
               </div>
-              <button
-                onClick={handleExport}
-                disabled={selectedProfiles.size === 0 || exporting}
-                className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
-              >
-                {exporting ? 'Exporting...' : `Export ${selectedProfiles.size > 0 ? `(${selectedProfiles.size})` : ''}`}
-              </button>
+              <div className="flex items-center gap-3">
+                {contactedCount > 0 && (
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={hideContacted}
+                      onChange={(e) => setHideContacted(e.target.checked)}
+                      className="w-4 h-4 cursor-pointer"
+                    />
+                    Hide contacted
+                  </label>
+                )}
+                <button
+                  onClick={handleExport}
+                  disabled={selectedProfiles.size === 0 || exporting}
+                  className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                >
+                  {exporting ? 'Exporting...' : `Export ${selectedProfiles.size > 0 ? `(${selectedProfiles.size})` : ''}`}
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto">
@@ -187,7 +213,7 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {profiles.map((profile) => (
+                  {filteredProfiles.map((profile) => (
                     <tr key={profile.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4">
                         <input
@@ -197,7 +223,16 @@ export default function Home() {
                           className="w-4 h-4 cursor-pointer"
                         />
                       </td>
-                      <td className="px-6 py-4 font-medium text-gray-900">{profile.name}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-900">{profile.name}</span>
+                          {profile.inHubSpot && (
+                            <span className="px-2 py-1 text-xs font-medium bg-orange-100 text-orange-700 rounded">
+                              In CRM
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 text-gray-800">{profile.title}</td>
                       <td className="px-6 py-4 text-gray-800">{profile.company}</td>
                       <td className="px-6 py-4 text-gray-700 text-sm max-w-xs truncate">{profile.summary}</td>
@@ -220,7 +255,8 @@ export default function Home() {
               </table>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* Empty State */}
         {!loading && profiles.length === 0 && !error && (

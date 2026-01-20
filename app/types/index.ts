@@ -5,4 +5,6 @@ export interface Profile {
   company: string;
   linkedinUrl: string;
   summary: string;
+  inHubSpot?: boolean;
+  hubSpotContactId?: string;
 }

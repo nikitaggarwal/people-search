@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Exa from 'exa-js';
+import { Client } from '@hubspot/api-client';
+import OpenAI from 'openai';
 
 export async function POST(request: NextRequest) {
   // Initialize Exa at runtime, not build time
@@ -15,11 +17,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract company and job title from query for better matching
-    // Examples: "data scientists at OpenAI" -> company: "OpenAI", title: "data scientist"
-    //           "engineers @ Meta" -> company: "Meta", title: "engineer"
-    const companyFromQuery = extractCompanyFromQuery(query);
-    const jobTitleFromQuery = extractJobTitleFromQuery(query);
+    // Use GPT to intelligently parse the query and generate search variations
+    const searchIntelligence = await parseQueryWithGPT(query);
+    
+    const companyFromQuery = searchIntelligence.company || extractCompanyFromQuery(query);
+    const jobTitleFromQuery = searchIntelligence.jobTitle || extractJobTitleFromQuery(query);
+    const titleVariations = searchIntelligence.titleVariations || [];
+    
+    console.log(`[DEBUG] GPT parsed query: company="${companyFromQuery}", title="${jobTitleFromQuery}", variations:`, titleVariations);
 
     // Use Exa to search for people profiles with LinkedIn URLs
     // Make query more specific about the company to get better matches
@@ -64,7 +69,8 @@ export async function POST(request: NextRequest) {
       }
       
       // Must have matching job title if specified in search
-      if (jobTitleFromQuery && !hasMatchingJobTitle(profile, jobTitleFromQuery)) {
+      // Check against main title and all GPT-generated variations
+      if (jobTitleFromQuery && !hasMatchingJobTitle(profile, jobTitleFromQuery, titleVariations)) {
         console.log(`[DEBUG] Filtered out ${profile.name}: Title mismatch (has: "${profile.title}", need: "${jobTitleFromQuery}")`);
         return false;
       }
@@ -75,11 +81,25 @@ export async function POST(request: NextRequest) {
     
     console.log(`[DEBUG] Final results: ${finalProfiles.length} profiles`);
 
-    return NextResponse.json({ profiles: finalProfiles });
+    // Check HubSpot for existing contacts to prevent duplicates
+    const profilesWithHubSpotStatus = await checkHubSpotStatus(finalProfiles);
+
+    return NextResponse.json({ profiles: profilesWithHubSpotStatus });
   } catch (error: any) {
     console.error('Search error:', error);
+    
+    // Provide more helpful error messages
+    let errorMessage = 'Failed to search profiles';
+    if (error.message?.includes('fetch failed') || error.message?.includes('timeout')) {
+      errorMessage = 'Search timed out. Exa API may be slow or unreachable. Please try again.';
+    } else if (error.message?.includes('API key')) {
+      errorMessage = 'Invalid Exa API key. Please check your configuration.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
     return NextResponse.json(
-      { error: error.message || 'Failed to search profiles' },
+      { error: errorMessage },
       { status: 500 }
     );
   }
@@ -107,8 +127,68 @@ function extractJobTitleFromQuery(query: string): string {
   return beforeAt.toLowerCase();
 }
 
+// Map of common job title synonyms for flexible matching
+const titleSynonyms: Record<string, string[]> = {
+  'director': ['director', 'head', 'vp', 'vice president', 'lead', 'principal'],
+  'engineer': ['engineer', 'developer', 'programmer', 'technologist', 'swe', 'mts', 'member of technical staff', 'ic', 'individual contributor', 'staff engineer', 'senior engineer'],
+  'scientist': ['scientist', 'researcher', 'research engineer', 'research scientist', 'applied scientist'],
+  'manager': ['manager', 'lead', 'supervisor', 'head', 'em', 'engineering manager', 'technical lead', 'tech lead', 'tl'],
+  'founder': ['founder', 'co-founder', 'cofounder', 'ceo', 'chief executive'],
+  'designer': ['designer', 'ux', 'ui', 'product designer', 'design lead', 'creative director'],
+  'analyst': ['analyst', 'associate', 'specialist', 'consultant'],
+  'product': ['product manager', 'pm', 'product lead', 'product owner', 'tpm', 'technical product manager'],
+  'data': ['data scientist', 'data engineer', 'data analyst', 'ml engineer', 'machine learning engineer'],
+};
+
+// Helper function to use GPT to intelligently parse search query
+async function parseQueryWithGPT(query: string): Promise<{
+  company: string;
+  jobTitle: string;
+  titleVariations: string[];
+}> {
+  // Skip GPT if no API key configured
+  if (!process.env.OPENAI_API_KEY) {
+    console.log('[DEBUG] No OpenAI API key, skipping GPT parsing');
+    return { company: '', jobTitle: '', titleVariations: [] };
+  }
+
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful assistant that parses job search queries. Extract the company name, job title, and provide alternative job titles that might be used at that company. Respond in JSON format: {\"company\": \"CompanyName\", \"jobTitle\": \"MainTitle\", \"titleVariations\": [\"alt1\", \"alt2\", \"alt3\"]}"
+        },
+        {
+          role: "user",
+          content: `Parse this job search query and provide alternatives: "${query}"\n\nFor example, if searching for "director at OpenAI", the title variations might include: "Head of", "VP", "Vice President", "Lead", etc. Consider what title variations that specific company might use.`
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: 200,
+    });
+
+    const responseText = completion.choices[0].message.content || '{}';
+    const parsed = JSON.parse(responseText);
+    
+    console.log('[DEBUG] GPT response:', parsed);
+    
+    return {
+      company: parsed.company || '',
+      jobTitle: parsed.jobTitle || '',
+      titleVariations: parsed.titleVariations || [],
+    };
+  } catch (error: any) {
+    console.error('[DEBUG] GPT parsing error:', error.message);
+    return { company: '', jobTitle: '', titleVariations: [] };
+  }
+}
+
 // Helper function to check if profile's job title matches searched title
-function hasMatchingJobTitle(profile: any, searchedTitle: string): boolean {
+function hasMatchingJobTitle(profile: any, searchedTitle: string, titleVariations: string[] = []): boolean {
   const profileTitle = (profile.title || '').toLowerCase();
   
   // Exclude profiles without a title
@@ -140,21 +220,120 @@ function hasMatchingJobTitle(profile: any, searchedTitle: string): boolean {
     }
   }
   
-  // Handle common variations
+  // Check GPT-generated title variations first (most accurate)
+  if (titleVariations.length > 0) {
+    for (const variation of titleVariations) {
+      const normalizedVariation = normalizeTitle(variation.toLowerCase());
+      if (normalizedProfile.includes(normalizedVariation) || normalizedVariation.includes(normalizedProfile)) {
+        return true;
+      }
+    }
+  }
+  
+  // Check for synonym matches (e.g., "director" should match "head", "vp", etc.)
+  // Also check if any search word matches any base title
+  const searchTerms = normalizedSearch.split(/\s+/);
+  
+  for (const [baseTitle, synonyms] of Object.entries(titleSynonyms)) {
+    // Check if search contains the base title or any word from it
+    const baseTitleWords = baseTitle.split(/\s+/);
+    const hasBaseTitleMatch = baseTitleWords.some(word => 
+      searchTerms.some(sw => sw.includes(word) || word.includes(sw))
+    );
+    
+    if (hasBaseTitleMatch || normalizedSearch.includes(baseTitle)) {
+      // Check if profile contains any synonym
+      if (synonyms.some(syn => normalizedProfile.includes(syn))) {
+        return true;
+      }
+    }
+  }
+  
+  // Handle common variations - more lenient matching
   // "engineer" matches "software engineer", "senior engineer", etc.
-  const searchWords = normalizedSearch.split(/\s+/);
+  const searchWords = searchTerms;
   const profileWords = normalizedProfile.split(/\s+/);
   
   // Check if key words from search appear in profile title
   const keyMatches = searchWords.filter(word => {
     // Skip common words
-    if (['a', 'the', 'and', 'or', 'at', 'in', 'of'].includes(word)) return false;
+    if (['a', 'the', 'and', 'or', 'at', 'in', 'of', 'senior', 'junior', 'staff'].includes(word)) return false;
     // Check if this word appears in profile title
     return profileWords.some((pWord: string) => pWord.includes(word) || word.includes(pWord));
   });
   
-  // If more than 50% of key words match, consider it a match
-  return keyMatches.length > 0 && keyMatches.length >= searchWords.length * 0.5;
+  // More lenient: If ANY key word matches, consider it a match (was 50%)
+  return keyMatches.length > 0;
+}
+
+// Helper function to add delay between requests
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper function to check if profiles already exist in HubSpot
+async function checkHubSpotStatus(profiles: any[]): Promise<any[]> {
+  if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+    console.log('[DEBUG] No HubSpot token, skipping duplicate check');
+    return profiles;
+  }
+
+  const hubspotClient = new Client({ accessToken: process.env.HUBSPOT_ACCESS_TOKEN });
+  const profilesWithStatus: any[] = [];
+
+  // Check profiles sequentially with delay to avoid rate limits
+  for (const profile of profiles) {
+    try {
+      // Search HubSpot for contact by LinkedIn URL
+      const searchResponse = await hubspotClient.crm.contacts.searchApi.doSearch({
+        filterGroups: [
+          {
+            filters: [
+              {
+                propertyName: 'hs_linkedin_url',
+                operator: 'EQ' as any,
+                value: profile.linkedinUrl,
+              },
+            ],
+          },
+        ],
+        properties: ['firstname', 'lastname'],
+        limit: 1,
+      });
+
+      if (searchResponse.results.length > 0) {
+        // Profile exists in HubSpot
+        console.log(`[DEBUG] ✓ Found ${profile.name} in HubSpot`);
+        profilesWithStatus.push({
+          ...profile,
+          inHubSpot: true,
+          hubSpotContactId: searchResponse.results[0].id,
+        });
+      } else {
+        // New profile
+        profilesWithStatus.push({
+          ...profile,
+          inHubSpot: false,
+        });
+      }
+      
+      // Add 200ms delay between requests to avoid rate limit
+      await delay(200);
+      
+    } catch (error: any) {
+      console.error(`Error checking HubSpot for ${profile.name}:`, error.message);
+      // On error, assume not in HubSpot
+      profilesWithStatus.push({
+        ...profile,
+        inHubSpot: false,
+      });
+    }
+  }
+
+  const inHubSpotCount = profilesWithStatus.filter(p => p.inHubSpot).length;
+  console.log(`[DEBUG] HubSpot check complete: ${inHubSpotCount}/${profilesWithStatus.length} already in CRM`);
+
+  return profilesWithStatus;
 }
 
 // Helper function to check if profile indicates employment at the searched company
