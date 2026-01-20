@@ -9,6 +9,8 @@ interface Profile {
   company: string;
   linkedinUrl: string;
   summary: string;
+  inHubSpot?: boolean;
+  hubSpotContactId?: string;
 }
 
 export default function Home() {
